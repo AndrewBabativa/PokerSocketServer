@@ -15,14 +15,17 @@ app.get("/", (req, res) => {
 const io = new Server(server, {
   cors: {
     origin: [
-      "https://pokergenys.netlify.app", // tu frontend prod
-      "http://localhost:5173"           // tu frontend local
+      "https://pokergenys.netlify.app", // frontend prod
+      "http://localhost:5173"           // frontend local
     ],
     methods: ["GET", "POST"],
     credentials: true
   },
   transports: ["websocket", "polling"] // primero websocket, fallback a polling
 });
+
+// ----------------- MAPPING DISPLAYID -> SOCKET -----------------
+const displays = new Map<string, string>(); // displayId -> socket.id
 
 // ----------------- SOCKET EVENTS -----------------
 io.on("connection", (socket) => {
@@ -36,7 +39,7 @@ io.on("connection", (socket) => {
     socket.emit("display-id", displayId);
   });
 
-  // Linkear torneo
+  // Linkear torneo a un display específico
   socket.on("link-display", ({ displayId, tournamentId }) => {
     console.log(`Link-display -> displayId=${displayId}, tournamentId=${tournamentId}`);
     const targetSocketId = displays.get(displayId);
@@ -48,18 +51,20 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Enviar datos completos del torneo
+  // Enviar datos completos del torneo a todos los displays
   socket.on("send-tournament-data", (tournamentData) => {
-    console.log("Enviando tournament-data:", tournamentData);
+    console.log("Enviando tournament-data a todos los displays:", tournamentData);
     io.emit("tournament-data", tournamentData);
   });
 
+  // Manejo de desconexión
   socket.on("disconnect", () => {
     console.log("Cliente desconectado:", socket.id);
     // eliminamos el displayId mapeado si existía
     for (const [id, sId] of displays.entries()) {
       if (sId === socket.id) {
         displays.delete(id);
+        console.log(`DisplayId ${id} eliminado del mapping`);
         break;
       }
     }
