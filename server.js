@@ -32,14 +32,20 @@ io.on("connection", (socket) => {
   socket.on("register-display", () => {
     const displayId = generateDisplayId();
     console.log(`Asignando displayId ${displayId} a socket ${socket.id}`);
+    displays.set(displayId, socket.id); // guardamos mapping
     socket.emit("display-id", displayId);
   });
 
   // Linkear torneo
   socket.on("link-display", ({ displayId, tournamentId }) => {
     console.log(`Link-display -> displayId=${displayId}, tournamentId=${tournamentId}`);
-    // Aquí puedes emitir a todos o a un namespace específico
-    io.emit("display-linked", { tournamentId });
+    const targetSocketId = displays.get(displayId);
+    if (targetSocketId) {
+      io.to(targetSocketId).emit("display-linked", { tournamentId });
+      console.log(`Evento display-linked enviado a socket ${targetSocketId}`);
+    } else {
+      console.warn(`DisplayId ${displayId} no encontrado`);
+    }
   });
 
   // Enviar datos completos del torneo
@@ -50,6 +56,13 @@ io.on("connection", (socket) => {
 
   socket.on("disconnect", () => {
     console.log("Cliente desconectado:", socket.id);
+    // eliminamos el displayId mapeado si existía
+    for (const [id, sId] of displays.entries()) {
+      if (sId === socket.id) {
+        displays.delete(id);
+        break;
+      }
+    }
   });
 });
 
