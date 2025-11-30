@@ -6,7 +6,6 @@ import { Server } from "socket.io";
 const app = express();
 const server = http.createServer(app);
 
-// Opcional: endpoint HTTP solo para testing
 app.get("/", (req, res) => {
   res.send("Socket.io server running ✅");
 });
@@ -15,17 +14,17 @@ app.get("/", (req, res) => {
 const io = new Server(server, {
   cors: {
     origin: [
-      "https://pokergenys.netlify.app", // frontend prod
-      "http://localhost:5173"           // frontend local
+      "https://pokergenys.netlify.app",
+      "http://localhost:5173"
     ],
     methods: ["GET", "POST"],
     credentials: true
   },
-  transports: ["websocket", "polling"] // primero websocket, fallback a polling
+  transports: ["websocket", "polling"]
 });
 
 // ----------------- MAPPING DISPLAYID -> SOCKET -----------------
-const displays = new Map<string, string>(); // displayId -> socket.id
+const displays = new Map(); // ⚠ JS puro, no <string,string>
 
 // ----------------- SOCKET EVENTS -----------------
 io.on("connection", (socket) => {
@@ -35,11 +34,11 @@ io.on("connection", (socket) => {
   socket.on("register-display", () => {
     const displayId = generateDisplayId();
     console.log(`Asignando displayId ${displayId} a socket ${socket.id}`);
-    displays.set(displayId, socket.id); // guardamos mapping
+    displays.set(displayId, socket.id);
     socket.emit("display-id", displayId);
   });
 
-  // Linkear torneo a un display específico
+  // Linkear torneo
   socket.on("link-display", ({ displayId, tournamentId }) => {
     console.log(`Link-display -> displayId=${displayId}, tournamentId=${tournamentId}`);
     const targetSocketId = displays.get(displayId);
@@ -51,16 +50,13 @@ io.on("connection", (socket) => {
     }
   });
 
-  // Enviar datos completos del torneo a todos los displays
   socket.on("send-tournament-data", (tournamentData) => {
     console.log("Enviando tournament-data a todos los displays:", tournamentData);
     io.emit("tournament-data", tournamentData);
   });
 
-  // Manejo de desconexión
   socket.on("disconnect", () => {
     console.log("Cliente desconectado:", socket.id);
-    // eliminamos el displayId mapeado si existía
     for (const [id, sId] of displays.entries()) {
       if (sId === socket.id) {
         displays.delete(id);
@@ -73,7 +69,7 @@ io.on("connection", (socket) => {
 
 // ----------------- HELPERS -----------------
 function generateDisplayId() {
-  return Math.random().toString(36).substring(2, 10); // ej: "a1b2c3d4"
+  return Math.random().toString(36).substring(2, 10);
 }
 
 // ----------------- START SERVER -----------------
