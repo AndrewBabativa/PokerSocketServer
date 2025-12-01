@@ -39,12 +39,30 @@ io.on("connection", (socket) => {
   });
 
   // Linkear torneo
-  socket.on("link-display", ({ displayId, tournamentId }) => {
+    socket.on("link-display", async ({ displayId, tournamentId }) => {
     console.log(`Link-display -> displayId=${displayId}, tournamentId=${tournamentId}`);
     const targetSocketId = displays.get(displayId);
     if (targetSocketId) {
-      io.to(targetSocketId).emit("display-linked", { tournamentId });
-      console.log(`Evento display-linked enviado a socket ${targetSocketId}`);
+      // Hacer que el socket del display entre a una room para ese torneo
+      const targetSocket = io.sockets.sockets.get(targetSocketId);
+      if (targetSocket) {
+        targetSocket.join(`tournament:${tournamentId}`);
+        // emitir evento de confirmación con tournamentId
+        targetSocket.emit("display-linked", { tournamentId });
+        console.log(`Evento display-linked enviado a socket ${targetSocketId}`);
+
+        // opcional: obtener estado del torneo y enviarlo
+        try {
+          const tournament = await getTournamentById(tournamentId); // implementa/ajusta esta función
+          if (tournament) {
+            targetSocket.emit("tournament-data", tournament);
+          }
+        } catch (err) {
+          console.warn("No pude obtener tournament-data:", err);
+        }
+      } else {
+        console.warn("No se encontró targetSocket por id:", targetSocketId);
+      }
     } else {
       console.warn(`DisplayId ${displayId} no encontrado`);
     }
@@ -52,16 +70,26 @@ io.on("connection", (socket) => {
 
   // admin -> server: acciones
   socket.on("player-action", async (payload) => {
-    // validar y aplicar cambios en DB
+    // valida y aplica cambios en DB
     const result = await applyPlayerAction(payload);
-    // enviar delta o estado actualizado a displays vinculados
+    // emitir a la room del torneo para que todos los displays lo reciban
     io.to(`tournament:${payload.tournamentId}`).emit("player-action", result);
+    // y emitir event específicos si quieres
+    if (payload.action === "eliminated") {
+      io.to(`tournament:${payload.tournamentId}`).emit("player-eliminated", { registrationId: payload.payload.registrationId, playerId: payload.payload.playerId });
+    }
   });
 
   socket.on("tournament-control", async ({ tournamentId, type, data }) => {
-    // type: start/pause/resume/timer-update
-    // actualizar DB si corresponde y reenviar
-    io.to(`tournament:${tournamentId}`).emit(type, { tournamentId, ...data });
+    // aplica cambios en DB
+    // ejemplo: pause
+    if (type === "pause") {
+      await setTournamentStatus(tournamentId, "Paused");
+      io.to(`tournament:${tournamentId}`).emit("tournament-paused", { tournamentId });
+    } else if (type === "update-level") {
+      await setTournamentLevel(tournamentId, data.level);
+      io.to(`tournament:${tournamentId}`).emit("update-level", { level: data.level, timeLeft: data.timeLeft });
+    }
   });
 
   socket.on("send-tournament-data", (tournamentData) => {
