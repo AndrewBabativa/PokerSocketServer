@@ -68,17 +68,6 @@ io.on("connection", (socket) => {
     }
   });
 
-  // admin -> server: acciones
-  socket.on("player-action", async (payload) => {
-    // valida y aplica cambios en DB
-    const result = await applyPlayerAction(payload);
-    // emitir a la room del torneo para que todos los displays lo reciban
-    io.to(`tournament:${payload.tournamentId}`).emit("player-action", result);
-    // y emitir event específicos si quieres
-    if (payload.action === "eliminated") {
-      io.to(`tournament:${payload.tournamentId}`).emit("player-eliminated", { registrationId: payload.payload.registrationId, playerId: payload.payload.playerId });
-    }
-  });
 
   socket.on("tournament-control", async ({ tournamentId, type, data }) => {
     // aplica cambios en DB
@@ -95,6 +84,20 @@ io.on("connection", (socket) => {
   socket.on("send-tournament-data", (tournamentData) => {
     console.log("Enviando tournament-data a todos los displays:", tournamentData);
     io.emit("tournament-data", tournamentData);
+  });
+
+  socket.on("join-tournament", ({ tournamentId }) => {
+    socket.join(tournamentId);
+    console.log(`Socket ${socket.id} joined tournament ${tournamentId}`);
+  });
+
+  socket.on("leave-tournament", ({ tournamentId }) => {
+    socket.leave(tournamentId);
+  });
+
+  // Emitir a todos en el room:
+  socket.on("player-action", ({ tournamentId, action, payload }) => {
+    io.to(tournamentId).emit("tournament-update", { action, payload });
   });
 
   socket.on("disconnect", () => {
