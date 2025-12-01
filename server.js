@@ -50,6 +50,20 @@ io.on("connection", (socket) => {
     }
   });
 
+  // admin -> server: acciones
+  socket.on("player-action", async (payload) => {
+    // validar y aplicar cambios en DB
+    const result = await applyPlayerAction(payload);
+    // enviar delta o estado actualizado a displays vinculados
+    io.to(`tournament:${payload.tournamentId}`).emit("player-action", result);
+  });
+
+  socket.on("tournament-control", async ({ tournamentId, type, data }) => {
+    // type: start/pause/resume/timer-update
+    // actualizar DB si corresponde y reenviar
+    io.to(`tournament:${tournamentId}`).emit(type, { tournamentId, ...data });
+  });
+
   socket.on("send-tournament-data", (tournamentData) => {
     console.log("Enviando tournament-data a todos los displays:", tournamentData);
     io.emit("tournament-data", tournamentData);
