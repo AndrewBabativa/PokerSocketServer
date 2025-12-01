@@ -19,26 +19,6 @@ function generateDisplayId() {
   return Math.random().toString(36).substring(2, 10);
 }
 
-// Mock de DB / lógica de torneo
-async function getTournamentById(id) {
-  console.log(`[Mock DB] getTournamentById -> ${id}`);
-  return {
-    id,
-    name: "Demo Tournament",
-    status: "Running",
-    buyIn: 100,
-    startingChips: 1000
-  };
-}
-
-async function setTournamentStatus(id, status) {
-  console.log(`[Mock DB] setTournamentStatus -> ${id}: ${status}`);
-}
-
-async function setTournamentLevel(id, level) {
-  console.log(`[Mock DB] setTournamentLevel -> ${id}: ${level}`);
-}
-
 // ✅ Configuración Socket.io
 const io = new Server(server, {
   cors: {
@@ -72,8 +52,8 @@ io.on("connection", (socket) => {
     socket.emit("display-id", displayId);
   });
 
-  // Linkear torneo
-  socket.on("link-display", async ({ displayId, tournamentId }) => {
+  // Linkear display a torneo (solo join room y emit confirmación)
+  socket.on("link-display", ({ displayId, tournamentId }) => {
     console.log(`[Socket.IO] link-display -> displayId=${displayId}, tournamentId=${tournamentId}`);
     const targetSocketId = displays.get(displayId);
     if (!targetSocketId) {
@@ -90,17 +70,7 @@ io.on("connection", (socket) => {
     const room = tournamentRoom(tournamentId);
     targetSocket.join(room);
     targetSocket.emit("display-linked", { tournamentId });
-    console.log(`[Socket.IO] Display ${displayId} unido a room ${room} y emit display-linked`);
-
-    try {
-      const tournament = await getTournamentById(tournamentId);
-      if (tournament) {
-        targetSocket.emit("tournament-data", tournament);
-        console.log(`[Socket.IO] Enviando tournament-data a display ${displayId}`);
-      }
-    } catch (err) {
-      console.warn("[Socket.IO] No pude obtener tournament-data:", err);
-    }
+    console.log(`[Socket.IO] Display ${displayId} unido a room ${room}`);
   });
 
   // Join / Leave tournament
@@ -117,23 +87,12 @@ io.on("connection", (socket) => {
   });
 
   // Control torneo: pause / resume / update-level
-  socket.on("tournament-control", async ({ tournamentId, type, data }) => {
+  socket.on("tournament-control", ({ tournamentId, type, data }) => {
     const room = tournamentRoom(tournamentId);
     console.log(`[Socket.IO] tournament-control -> type=${type}, tournamentId=${tournamentId}`);
 
-    if (type === "pause") {
-      await setTournamentStatus(tournamentId, "Paused");
-      io.to(room).emit("tournament-paused", { tournamentId });
-      console.log(`[Socket.IO] Torneo ${tournamentId} pausado`);
-    } else if (type === "resume") {
-      await setTournamentStatus(tournamentId, "Running");
-      io.to(room).emit("tournament-resumed", { tournamentId });
-      console.log(`[Socket.IO] Torneo ${tournamentId} reanudado`);
-    } else if (type === "update-level") {
-      await setTournamentLevel(tournamentId, data.level);
-      io.to(room).emit("update-level", { level: data.level, timeLeft: data.timeLeft });
-      console.log(`[Socket.IO] Torneo ${tournamentId} level actualizado -> level=${data.level}`);
-    }
+    // Emitimos evento a todos los clientes conectados a la room
+    io.to(room).emit("tournament-control", { type, data });
   });
 
   // Player actions
@@ -143,7 +102,7 @@ io.on("connection", (socket) => {
     console.log(`[Socket.IO] player-action emitido en room ${room}:`, { action, payload });
   });
 
-  // Enviar datos a todos los displays
+  // Enviar datos a todos los displays (opcional si frontend necesita actualizar algo manual)
   socket.on("send-tournament-data", (tournamentData) => {
     console.log("[Socket.IO] Enviando tournament-data a todos los displays:", tournamentData);
     io.emit("tournament-data", tournamentData);
@@ -160,7 +119,6 @@ io.on("connection", (socket) => {
       }
     }
   });
-
 });
 
 // ----------------- START SERVER -----------------
