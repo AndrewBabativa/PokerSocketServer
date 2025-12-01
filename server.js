@@ -12,7 +12,7 @@ app.get("/", (req, res) => {
 });
 
 // ----------------- HELPERS -----------------
-function tournamentRoom(tournamentId: string) {
+function tournamentRoom(tournamentId) {
   return `tournament:${tournamentId}`;
 }
 
@@ -21,15 +21,7 @@ function generateDisplayId() {
 }
 
 // ----------------- TORNEOS EN MEMORIA -----------------
-interface ActiveTournament {
-  tournamentId: string;
-  currentLevel: number;
-  levelStartTimestamp: number;
-  levels: { levelNumber: number; durationSeconds: number }[];
-  timerInterval?: NodeJS.Timer;
-}
-
-const activeTournaments = new Map<string, ActiveTournament>();
+const activeTournaments = new Map();
 
 // ✅ Configuración Socket.io
 const io = new Server(server, {
@@ -45,7 +37,7 @@ const io = new Server(server, {
 });
 
 // ----------------- MAPPING DISPLAYID -> SOCKET -----------------
-const displays = new Map<string, string>();
+const displays = new Map();
 
 // ----------------- SOCKET EVENTS -----------------
 io.on("connection", (socket) => {
@@ -134,11 +126,11 @@ io.on("connection", (socket) => {
     } 
     else if (type === "start" && data?.levels) {
       if (activeTournaments.has(tournamentId)) return;
-      const levels = data.levels.map((lvl: any) => ({
+      const levels = data.levels.map(lvl => ({
         levelNumber: lvl.levelNumber,
         durationSeconds: lvl.durationSeconds
       }));
-      const newActive: ActiveTournament = {
+      const newActive = {
         tournamentId,
         currentLevel: 1,
         levelStartTimestamp: Date.now(),
@@ -170,7 +162,7 @@ io.on("connection", (socket) => {
 });
 
 // ----------------- FUNCIONES AUXILIARES -----------------
-function startTournamentTimer(active: ActiveTournament, room: string) {
+function startTournamentTimer(active, room) {
   if (active.timerInterval) clearInterval(active.timerInterval);
 
   active.timerInterval = setInterval(() => {
@@ -178,7 +170,7 @@ function startTournamentTimer(active: ActiveTournament, room: string) {
     const currentLvl = active.levels[active.currentLevel - 1];
     const elapsed = Math.floor((now - active.levelStartTimestamp) / 1000);
 
-    if (elapsed >= (currentLvl?.durationSeconds ?? 0)) {
+    if (elapsed >= (currentLvl?.durationSeconds || 0)) {
       if (active.currentLevel < active.levels.length) {
         active.currentLevel++;
         active.levelStartTimestamp = Date.now();
