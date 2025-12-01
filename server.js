@@ -11,12 +11,32 @@ app.get("/", (req, res) => {
 });
 
 // ----------------- HELPERS -----------------
-function tournamentRoom(tournamentId: string) {
+function tournamentRoom(tournamentId) {
   return `tournament:${tournamentId}`;
 }
 
 function generateDisplayId() {
   return Math.random().toString(36).substring(2, 10);
+}
+
+// Mock de DB / lógica de torneo
+async function getTournamentById(id) {
+  console.log(`[Mock DB] getTournamentById -> ${id}`);
+  return {
+    id,
+    name: "Demo Tournament",
+    status: "Running",
+    buyIn: 100,
+    startingChips: 1000
+  };
+}
+
+async function setTournamentStatus(id, status) {
+  console.log(`[Mock DB] setTournamentStatus -> ${id}: ${status}`);
+}
+
+async function setTournamentLevel(id, level) {
+  console.log(`[Mock DB] setTournamentLevel -> ${id}: ${level}`);
 }
 
 // ✅ Configuración Socket.io
@@ -33,7 +53,7 @@ const io = new Server(server, {
 });
 
 // ----------------- MAPPING DISPLAYID -> SOCKET -----------------
-const displays = new Map<string, string>();
+const displays = new Map();
 
 // ----------------- SOCKET EVENTS -----------------
 io.on("connection", (socket) => {
@@ -73,7 +93,7 @@ io.on("connection", (socket) => {
     console.log(`[Socket.IO] Display ${displayId} unido a room ${room} y emit display-linked`);
 
     try {
-      const tournament = await getTournamentById(tournamentId); // Ajusta esta función
+      const tournament = await getTournamentById(tournamentId);
       if (tournament) {
         targetSocket.emit("tournament-data", tournament);
         console.log(`[Socket.IO] Enviando tournament-data a display ${displayId}`);
