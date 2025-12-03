@@ -318,6 +318,18 @@ io.on("connection", (socket) => {
     socket.on("player-action", ({ tournamentId, action, payload }) => {
         socket.to(tournamentRoom(tournamentId)).emit("player-action", { action, payload });
     });
+	
+	// Agrega esto debajo de tus otros eventos
+	socket.on("admin-instruction", ({ tournamentId, type, message, payload }) => {
+		console.log(`[Instruction] Torneo ${tournamentId}: ${type} - ${message}`);
+		
+		// Emitir a la sala del torneo (TVs y otros admins)
+		io.to(tournamentRoom(tournamentId)).emit("tournament-instruction", {
+			type: type,      // Ej: "BALANCE_REQUIRED" o "FINAL_TABLE"
+			message: message, // Ej: "Mover jugador de Mesa 1 a Mesa 3"
+			payload: payload  // Datos extra (IDs de mesas, asientos)
+		});
+	});
 });
 
 server.listen(PORT, () => {
