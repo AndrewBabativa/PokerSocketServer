@@ -10,6 +10,23 @@ const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
+app.post('/api/webhook/emit', (req, res) => {
+    const { tournamentId, event, data } = req.body;
+
+    if (!tournamentId || !event) {
+        return res.status(400).send("Faltan datos");
+    }
+
+    const room = tournamentRoom(tournamentId);
+    
+    console.log(`[Webhook C#] Emitiendo '${event}' a sala ${room}`);
+    
+    // Emitir a la sala específica
+    io.to(room).emit(event, data);
+
+    res.status(200).send({ success: true });
+});
+
 // URL de tu Backend C# (Asegúrate de que esta URL sea accesible desde el servidor Node)
 const BACKEND_API = "https://pokergenysbackend.onrender.com/api/Tournaments";
 
