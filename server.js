@@ -356,7 +356,7 @@ io.on("connection", (socket) => {
     });
 });
 
-// Importante: Escuchar en 0.0.0.0 para Render
+// Importante: Escuchar en 0.0 para Render
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Server Socket.io LISTO en puerto ${PORT}`);
     console.log(`🌍 Health Check disponible en GET /`);
