@@ -10,21 +10,32 @@ const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
-// ⚠️ CORRECCIÓN 1: Middleware para entender JSON (Vital para recibir datos de C#)
+// Middleware para JSON
 app.use(express.json());
 
-// ⚠️ CORRECCIÓN 2: Ruta de Health Check para Render
-// Render llama aquí para saber si el server está vivo. Si no existe, da "Timed Out".
+// 🔥 LOGGING HTTP (Ver tráfico de C#)
+// Esto imprimirá cada vez que C# llame al Webhook
+app.use((req, res, next) => {
+    // Ignoramos la ruta raíz para no ensuciar el log con los Health Checks de Render
+    if (req.path !== '/') {
+        console.log(`📡 [HTTP INCOMING] ${req.method} ${req.path}`);
+        if (req.method === 'POST') {
+            console.log('   📦 Body:', JSON.stringify(req.body, null, 2));
+        }
+    }
+    next();
+});
+
+// Ruta de Health Check (Vital para Render)
 app.get('/', (req, res) => {
     res.status(200).send("Poker Socket Server is Running 🚀");
 });
 
-// URL de tu Backend C#
+// URL Backend C#
 const BACKEND_API = "https://pokergenysbackend.onrender.com/api/Tournaments";
 
 const io = new Server(server, {
     cors: {
-        // Asegúrate de que estas URLS son correctas (sin barras al final a veces ayuda)
         origin: ["https://pokergenys.netlify.app", "http://localhost:5173"], 
         methods: ["GET", "POST"],
         credentials: true
@@ -36,17 +47,16 @@ const io = new Server(server, {
 // 2. WEBHOOK (Comunicación C# -> Node)
 // ==========================================
 app.post('/api/webhook/emit', (req, res) => {
-    // Gracias a 'app.use(express.json())', ahora req.body sí tiene datos
     const { tournamentId, event, data } = req.body;
 
     if (!tournamentId || !event) {
-        console.warn("[Webhook] Intento fallido: Faltan datos", req.body);
+        console.warn("⚠️ [Webhook] Rechazado: Faltan datos", req.body);
         return res.status(400).send("Faltan datos");
     }
 
     const room = tournamentRoom(tournamentId);
     
-    console.log(`[Webhook C#] Emitiendo '${event}' a sala ${room}`);
+    console.log(`📢 [Webhook Relay] C# dice: '${event}' -> Sala: ${room}`);
     
     // Emitir a la sala específica
     io.to(room).emit(event, data);
@@ -62,7 +72,7 @@ const tournamentRoom = (id) => `tournament:${id}`;
 const displays = new Map();
 
 // ==========================================
-// 4. LÓGICA DE NEGOCIO (REPLICA DE C#)
+// 4. LÓGICA DE NEGOCIO
 // ==========================================
 
 function calculateState(startTimeStr, levels) {
@@ -70,7 +80,6 @@ function calculateState(startTimeStr, levels) {
 
     const now = Date.now();
     const startTime = new Date(startTimeStr).getTime(); 
-    
     const elapsedMs = now - startTime;
 
     let levelIndex = 0;
@@ -110,7 +119,7 @@ function runTournamentLoop(tournamentId, room) {
 
     if (active.timerInterval) clearInterval(active.timerInterval);
 
-    console.log(`[Timer] Iniciando loop para torneo ${tournamentId}`);
+    console.log(`⏱️ [Timer] Loop INICIADO para ${tournamentId}`);
 
     active.timerInterval = setInterval(async () => {
         const state = calculateState(active.startTime, active.levels);
@@ -119,6 +128,7 @@ function runTournamentLoop(tournamentId, room) {
 
         // Caso: Terminado
         if (state.finished) {
+            console.log(`🏁 [Timer] Torneo ${tournamentId} FINALIZADO`);
             clearInterval(active.timerInterval);
             activeTournaments.delete(tournamentId);
             
@@ -130,15 +140,13 @@ function runTournamentLoop(tournamentId, room) {
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ Status: "Completed" })
                 });
-            } catch(e) { console.error("Error actualizando status FINISH a C#", e); }
-            
-            console.log(`[Timer] Torneo ${tournamentId} finalizado.`);
+            } catch(e) { console.error("❌ Error actualizando status FINISH a C#", e.message); }
             return;
         }
 
         // Caso: Cambio de Nivel
         if (state.currentLevel !== active.cachedCurrentLevel) {
-            console.log(`[Timer] Cambio de Nivel: ${active.cachedCurrentLevel} -> ${state.currentLevel}`);
+            console.log(`🆙 [Timer] NIVEL UP: ${active.cachedCurrentLevel} -> ${state.currentLevel}`);
             
             active.cachedCurrentLevel = state.currentLevel;
 
@@ -153,14 +161,16 @@ function runTournamentLoop(tournamentId, room) {
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ CurrentLevel: state.currentLevel })
                 });
-            } catch(e) { console.error("Error patch level", e); }
+            } catch(e) { console.error("❌ Error patching level", e.message); }
         }
 
         // Caso: Tick normal
+        // NOTA: Comentamos el log del tick para no saturar la consola de Render (1 log por segundo)
+        // console.log(`tick ${state.timeRemaining}`); 
         io.to(room).emit("timer-sync", {
             currentLevel: state.currentLevel,
             timeLeft: state.timeRemaining,
-            status: "Running" // Agregamos status explícito para ayudar al frontend
+            status: "Running"
         });
 
     }, 1000);
@@ -172,25 +182,33 @@ function runTournamentLoop(tournamentId, room) {
 
 async function getTournamentFromApi(id) {
     try {
+        console.log(`🔍 [API] Fetching torneo ${id}...`);
         const res = await fetch(`${BACKEND_API}/${id}`);
-        if (!res.ok) return null;
+        if (!res.ok) {
+            console.error(`❌ [API] Error ${res.status} al obtener torneo`);
+            return null;
+        }
         return await res.json();
     } catch (e) {
-        console.error("Error fetching API:", e);
+        console.error("❌ [API] Excepción fetching:", e.message);
         return null;
     }
 }
 
 async function startTournamentApi(id) {
     try {
+        console.log(`▶️ [API] Iniciando torneo ${id} en C#...`);
         const res = await fetch(`${BACKEND_API}/${id}/start`, {
             method: "POST",
             headers: { "Content-Type": "application/json" }
         });
-        if (!res.ok) return null;
+        if (!res.ok) {
+            console.error(`❌ [API] Error ${res.status} al iniciar torneo`);
+            return null;
+        }
         return await res.json();
     } catch (e) {
-        console.error("Error starting API:", e);
+        console.error("❌ [API] Excepción starting:", e.message);
         return null;
     }
 }
@@ -200,12 +218,21 @@ async function startTournamentApi(id) {
 // ==========================================
 
 io.on("connection", (socket) => {
-    console.log(`[Connect] Cliente ${socket.id}`);
+    console.log(`🔌 [Socket] Cliente Conectado: ${socket.id}`);
+
+    // 🔥 LOGGING DE SOCKETS (Ver qué manda el cliente)
+    socket.onAny((eventName, ...args) => {
+        // Filtramos timer-sync si lo emitiese el cliente (raro) para no saturar
+        if (eventName !== 'timer-sync') {
+            console.log(`📨 [Socket IN] Evento: "${eventName}"`, args);
+        }
+    });
 
     socket.on("register-display", () => {
         const id = Math.random().toString(36).substring(2, 8).toUpperCase();
         displays.set(id, socket.id);
         socket.emit("display-id", id);
+        console.log(`📺 [Display] Registrada TV con código: ${id}`);
     });
 
     socket.on("link-display", ({ displayId, tournamentId }) => {
@@ -215,7 +242,10 @@ io.on("connection", (socket) => {
             if (target) {
                 target.join(tournamentRoom(tournamentId));
                 target.emit("display-linked", { tournamentId });
+                console.log(`🔗 [Link] TV ${displayId} vinculada a torneo ${tournamentId}`);
             }
+        } else {
+            console.warn(`⚠️ [Link] Intento fallido: Display ID ${displayId} no encontrado`);
         }
     });
 
@@ -223,16 +253,15 @@ io.on("connection", (socket) => {
         if (!tournamentId) return;
         const room = tournamentRoom(tournamentId);
         socket.join(room);
+        console.log(`👤 [Join] Cliente ${socket.id} se unió a sala ${room}`);
 
         let active = activeTournaments.get(tournamentId);
 
-        // Recuperación (Resurrección) si Node se reinició pero C# dice que corre
+        // Recuperación
         if (!active) {
             const t = await getTournamentFromApi(tournamentId);
-            
-            // Verificamos "Running" sin importar mayúsculas/minúsculas
             if (t && t.startTime && t.status && t.status.toLowerCase() === "running") {
-                console.log(`[Recovery] Reviviendo torneo ${t.name}`);
+                console.log(`♻️ [Recovery] Reviviendo torneo activo ${t.name}`);
                 active = {
                     id: t.id,
                     startTime: t.startTime,
@@ -267,9 +296,9 @@ io.on("connection", (socket) => {
 
     socket.on("tournament-control", async ({ tournamentId, type }) => {
         const room = tournamentRoom(tournamentId);
+        console.log(`🎮 [Control] Comando recibido: ${type} para ${tournamentId}`);
         
         if (type === "start") {
-            console.log(`[Control] Start ${tournamentId}`);
             const updatedTournament = await startTournamentApi(tournamentId);
 
             if (updatedTournament) {
@@ -309,10 +338,8 @@ io.on("connection", (socket) => {
         }
     });
 
-    // --- RELAY DE C# ---
+    // --- RELAYS ---
     socket.on("player-action", ({ tournamentId, action, payload }) => {
-        // Esto lo usabas antes cuando el front emitía. 
-        // Ahora C# emite via webhook, pero dejamos esto por si acaso.
         socket.to(tournamentRoom(tournamentId)).emit("player-action", { action, payload });
     });
     
@@ -323,9 +350,15 @@ io.on("connection", (socket) => {
             payload: payload
         });
     });
+
+    socket.on("disconnect", (reason) => {
+        // console.log(`❌ [Socket] Cliente desconectado: ${reason}`); // Descomentar si quieres ver desconexiones
+    });
 });
 
 // Importante: Escuchar en 0.0.0.0 para Render
 server.listen(PORT, '0.0.0.0', () => {
-    console.log(`✅ Server Socket.io listo en puerto ${PORT}`);
+    console.log(`✅ Server Socket.io LISTO en puerto ${PORT}`);
+    console.log(`🌍 Health Check disponible en GET /`);
+    console.log(`🔗 Webhook disponible en POST /api/webhook/emit`);
 });
