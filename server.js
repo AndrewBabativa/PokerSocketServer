@@ -75,39 +75,35 @@ function calculateState(startTimeStr, levels) {
 
     const now = Date.now();
     const startTime = new Date(startTimeStr).getTime(); 
-    const elapsedMs = now - startTime;
+    // Math.max(0, ...) evita tiempos negativos si el reloj del sistema varía
+    const elapsedMs = Math.max(0, now - startTime);
 
-    let levelIndex = 0;
     let levelStartMs = 0;
-    let timeRemainingSeconds = 0;
-    let found = false;
-
+    
     const sortedLevels = levels.sort((a, b) => a.levelNumber - b.levelNumber);
 
     for (let i = 0; i < sortedLevels.length; i++) {
         const lvl = sortedLevels[i];
         const durationMs = lvl.durationSeconds * 1000;
+        const levelEndMs = levelStartMs + durationMs;
 
-        if (elapsedMs < (levelStartMs + durationMs)) {
-            timeRemainingSeconds = (levelStartMs + durationMs - elapsedMs) / 1000;
-            levelIndex = i;
-            found = true;
-            break;
+        // Si estamos dentro de este nivel
+        if (elapsedMs < levelEndMs) {
+            const timeRemainingSeconds = Math.ceil((levelEndMs - elapsedMs) / 1000);
+            
+            return {
+                finished: false,
+                currentLevel: lvl.levelNumber,
+                timeRemaining: timeRemainingSeconds
+            };
         }
+        
         levelStartMs += durationMs;
     }
 
-    if (!found) {
-        return { finished: true, currentLevel: sortedLevels.length + 1, timeRemaining: 0 };
-    }
-
-    return {
-        finished: false,
-        currentLevel: sortedLevels[levelIndex].levelNumber,
-        timeRemaining: Math.ceil(timeRemainingSeconds)
-    };
+    // Si salimos del loop, se acabó el tiempo de todos los niveles
+    return { finished: true, currentLevel: sortedLevels.length, timeRemaining: 0 };
 }
-
 function runTournamentLoop(tournamentId, room) {
     const active = activeTournaments.get(tournamentId);
     if (!active) return;
@@ -289,26 +285,20 @@ io.on("connection", (socket) => {
         console.log(`🎮 [Control] Comando recibido: ${type} para ${tournamentId}`);
         
         if (type === "start") {
-            const updatedTournament = await startTournamentApi(tournamentId);
-
-            if (updatedTournament) {
-                const active = {
-                    id: updatedTournament.id,
-                    startTime: updatedTournament.startTime,
-                    levels: updatedTournament.levels,
-                    cachedCurrentLevel: 1,
-                    timerInterval: null
-                };
-                activeTournaments.set(tournamentId, active);
-
-                io.to(room).emit("tournament-control", { 
-                    type: "start",
-                    data: { level: 1 } 
-                });
-
-                runTournamentLoop(tournamentId, room);
-            }
-        }
+         const updatedTournament = await startTournamentApi(tournamentId); // Llama al C# StartTournamentAsync corregido
+         if(updatedTournament) {
+             // Actualizamos el mapa en memoria con el NUEVO StartTime calculado por C#
+             const active = {
+                 id: updatedTournament.id,
+                 startTime: updatedTournament.startTime, // <--- CLAVE: Usar el nuevo StartTime
+                 levels: updatedTournament.levels,
+                 cachedCurrentLevel: updatedTournament.currentLevel,
+                 // ...
+             };
+             activeTournaments.set(tournamentId, active);
+             runTournamentLoop(tournamentId, tournamentRoom(tournamentId));
+         }
+    }
         else if (type === "pause") {
             const active = activeTournaments.get(tournamentId);
             if (active) {
