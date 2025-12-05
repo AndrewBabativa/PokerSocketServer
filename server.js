@@ -14,13 +14,13 @@ const PORT = process.env.PORT || 3000;
 app.use(express.json());
 
 // 🔥 LOGGING HTTP (Ver tráfico de C#)
-// Esto imprimirá cada vez que C# llame al Webhook
 app.use((req, res, next) => {
-    // Ignoramos la ruta raíz para no ensuciar el log con los Health Checks de Render
     if (req.path !== '/') {
         console.log(`📡 [HTTP INCOMING] ${req.method} ${req.path}`);
         if (req.method === 'POST') {
-            console.log('   📦 Body:', JSON.stringify(req.body, null, 2));
+            // Logueamos solo un resumen para no saturar la consola si el body es gigante
+            const bodyPreview = JSON.stringify(req.body).substring(0, 200);
+            console.log(`   📦 Body: ${bodyPreview}...`);
         }
     }
     next();
@@ -36,41 +36,30 @@ const BACKEND_API = "https://pokergenysbackend.onrender.com/api/Tournaments";
 
 const io = new Server(server, {
     cors: {
-        origin: ["https://pokergenys.netlify.app", "http://localhost:5173"], 
+        // Permitimos cualquier origen para evitar bloqueos CORS en producción
+        // Puedes restringirlo a tus dominios reales si lo prefieres
+        origin: "*", 
         methods: ["GET", "POST"],
         credentials: true
     },
-    transports: ["websocket", "polling"]
+    // 🔥 CONFIGURACIÓN CRÍTICA PARA RENDER 🔥
+    // Render usa balanceadores de carga que rompen el HTTP Long-Polling si no hay Sticky Sessions.
+    // Al permitir y priorizar 'websocket', reducimos errores de transporte.
+    transports: ["websocket", "polling"], 
+    
+    // Tiempos de espera extendidos para evitar desconexiones fantasma
+    pingTimeout: 60000, 
+    pingInterval: 25000 
 });
 
 // ==========================================
-// 2. WEBHOOK (Comunicación C# -> Node)
+// 2. ESTADO EN MEMORIA Y UTILIDADES
 // ==========================================
-app.post('/api/webhook/emit', (req, res) => {
-    const { tournamentId, event, data } = req.body;
-
-    if (!tournamentId || !event) {
-        console.warn("⚠️ [Webhook] Rechazado: Faltan datos", req.body);
-        return res.status(400).send("Faltan datos");
-    }
-
-    const room = tournamentRoom(tournamentId);
-    
-    console.log(`📢 [Webhook Relay] C# dice: '${event}' -> Sala: ${room}`);
-    
-    // Emitir a la sala específica
-    io.to(room).emit(event, data);
-
-    res.status(200).send({ success: true });
-});
-
-// ==========================================
-// LÓGICA DE NEGOCIO (TIMER ENGINE)
-// ==========================================
-// Movemos esto arriba para poder usarlo en el webhook
 const activeTournaments = new Map();
+const displays = new Map();
 const tournamentRoom = (id) => `tournament:${id}`;
 
+// Lógica del Timer (Motor de Tiempo)
 function calculateState(startTimeStr, levels) {
     if (!startTimeStr || !levels || levels.length === 0) return null;
 
@@ -102,14 +91,14 @@ function calculateState(startTimeStr, levels) {
     return { finished: true, currentLevel: sortedLevels.length, timeRemaining: 0 };
 }
 
-function runTournamentLoop(tournamentId, ioInstance) { // Pasamos IO como argumento
-    // Si ya existe un loop, no creamos otro, pero actualizamos la referencia si es necesario
+function runTournamentLoop(tournamentId, ioInstance) { 
+    // Si ya existe un loop activo, lo reutilizamos o reiniciamos limpiamente
     let active = activeTournaments.get(tournamentId);
     if (!active) return;
 
     if (active.timerInterval) clearInterval(active.timerInterval);
 
-    console.log(`⏱️ [Timer] Loop INICIADO/REINICIADO para ${tournamentId}`);
+    console.log(`⏱️ [Timer] Loop INICIADO para ${tournamentId}`);
 
     active.timerInterval = setInterval(async () => {
         // Recalcular estado basado en StartTime (Fuente de la verdad)
@@ -171,13 +160,34 @@ function runTournamentLoop(tournamentId, ioInstance) { // Pasamos IO como argume
     activeTournaments.set(tournamentId, active);
 }
 
+// ... (Helpers de API: getTournamentFromApi se mantiene igual si lo tenías definido abajo, 
+// si no, asegúrate de incluirlo. Aquí asumo que ya lo tienes o lo necesitas) ...
+
+async function getTournamentFromApi(id) {
+    try {
+        console.log(`🔍 [API] Fetching torneo ${id}...`);
+        const res = await fetch(`${BACKEND_API}/${id}`);
+        if (!res.ok) {
+            console.error(`❌ [API] Error ${res.status} al obtener torneo`);
+            return null;
+        }
+        return await res.json();
+    } catch (e) {
+        console.error("❌ [API] Excepción fetching:", e.message);
+        return null;
+    }
+}
+
 // ==========================================
-// 2. WEBHOOK (CORREGIDO Y OPTIMIZADO)
+// 3. WEBHOOK (Comunicación C# -> Node)
 // ==========================================
 app.post('/api/webhook/emit', (req, res) => {
     const { tournamentId, event, data } = req.body;
 
-    if (!tournamentId || !event) return res.status(400).send("Datos incompletos");
+    if (!tournamentId || !event) {
+        console.warn("⚠️ [Webhook] Rechazado: Faltan datos", req.body);
+        return res.status(400).send("Faltan datos");
+    }
 
     const room = tournamentRoom(tournamentId);
     
@@ -185,7 +195,7 @@ app.post('/api/webhook/emit', (req, res) => {
     io.to(room).emit(event, data);
     console.log(`📢 [Broadcast] ${event} -> ${room}`);
 
-    // B. INTERCEPTAR COMANDOS DE CONTROL (La corrección clave)
+    // B. INTERCEPTAR COMANDOS DE CONTROL (La corrección clave para que arranque el reloj)
     if (event === "tournament-control") {
         
         // --- START / RESUME ---
@@ -236,23 +246,43 @@ app.post('/api/webhook/emit', (req, res) => {
     res.status(200).send({ success: true });
 });
 
-// ... (Resto de helpers API: getTournamentFromApi igual que antes) ...
-
 // ==========================================
-// SOCKET EVENTS
+// 4. SOCKET EVENTS
 // ==========================================
 io.on("connection", (socket) => {
     
-    // ... (Lógica de displays igual) ...
+    // A. GESTIÓN DE PANTALLAS (TV PAIRING)
+    socket.on("register-display", () => {
+        const id = Math.random().toString(36).substring(2, 8).toUpperCase();
+        displays.set(id, socket.id);
+        socket.emit("display-id", id);
+        console.log(`📺 [Display] Registrada TV con código: ${id}`);
+    });
 
+    socket.on("link-display", ({ displayId, tournamentId }) => {
+        const targetId = displays.get(displayId);
+        if (targetId) {
+            const target = io.sockets.sockets.get(targetId);
+            if (target) {
+                target.join(tournamentRoom(tournamentId));
+                target.emit("display-linked", { tournamentId });
+                console.log(`🔗 [Link] TV ${displayId} vinculada a torneo ${tournamentId}`);
+            }
+        } else {
+            console.warn(`⚠️ [Link] Intento fallido: Display ID ${displayId} no encontrado`);
+        }
+    });
+
+    // B. UNIRSE A TORNEO
     socket.on("join-tournament", async ({ tournamentId }) => {
         if (!tournamentId) return;
         const room = tournamentRoom(tournamentId);
         socket.join(room);
+        console.log(`👤 [Join] Cliente ${socket.id} se unió a sala ${room}`);
         
         // RECUPERACIÓN INTELIGENTE
-        // Si el cliente se conecta y Node NO tiene el torneo corriendo en memoria,
-        // verificamos con la API por si acaso Node se reinició pero el torneo sigue "Running" en BD.
+        // Si el cliente se conecta y Node NO tiene el torneo corriendo en memoria (ej. tras reinicio),
+        // verificamos con la API por si acaso el torneo sigue "Running" en BD.
         let active = activeTournaments.get(tournamentId);
 
         if (!active) {
@@ -285,11 +315,18 @@ io.on("connection", (socket) => {
         }
     });
 
-    // Eliminamos el listener "tournament-control" del socket.
-    // SEGURIDAD: Los clientes NO deben poder iniciar/pausar torneos directamente por socket.
-    // Todo debe pasar por la API C# -> Webhook.
+    socket.on("leave-tournament", ({ tournamentId }) => {
+        if(tournamentId) socket.leave(tournamentRoom(tournamentId));
+    });
+
+    socket.on("disconnect", (reason) => {
+        // Cliente desconectado
+    });
 });
 
+// Importante: Escuchar en 0.0.0.0 para Render
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Server Socket.io LISTO en puerto ${PORT}`);
+    console.log(`🌍 Health Check disponible en GET /`);
+    console.log(`🔗 Webhook disponible en POST /api/webhook/emit`);
 });
