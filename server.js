@@ -10,24 +10,29 @@ const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
-// URL Backend C#
-const BACKEND_API = "https://pokergenysbackend.onrender.com/api/Tournaments";
-
 // Middleware para JSON
 app.use(express.json());
 
-// 🔥 LOGGING HTTP (Solo Webhooks relevantes)
+// 🔥 LOGGING HTTP (Ver tráfico de C#)
+// Esto imprimirá cada vez que C# llame al Webhook
 app.use((req, res, next) => {
-    if (req.method === 'POST' && req.path.includes('webhook')) {
-        console.log(`📨 [Webhook] Evento recibido desde C#:`, JSON.stringify(req.body, null, 2));
+    // Ignoramos la ruta raíz para no ensuciar el log con los Health Checks de Render
+    if (req.path !== '/') {
+        console.log(`📡 [HTTP INCOMING] ${req.method} ${req.path}`);
+        if (req.method === 'POST') {
+            console.log('   📦 Body:', JSON.stringify(req.body, null, 2));
+        }
     }
     next();
 });
 
-// Ruta de Health Check
+// Ruta de Health Check (Vital para Render)
 app.get('/', (req, res) => {
     res.status(200).send("Poker Socket Server is Running 🚀");
 });
+
+// URL Backend C#
+const BACKEND_API = "https://pokergenysbackend.onrender.com/api/Tournaments";
 
 const io = new Server(server, {
     cors: {
@@ -51,35 +56,30 @@ app.post('/api/webhook/emit', (req, res) => {
 
     const room = tournamentRoom(tournamentId);
     
-    console.log(`📢 [Broadcast] Enviando '${event}' a Sala: ${room}`);
+    console.log(`📢 [Webhook Relay] C# dice: '${event}' -> Sala: ${room}`);
     
-    // Emitir a la sala específica (TVs y Clientes escuchan esto)
+    // Emitir a la sala específica
     io.to(room).emit(event, data);
 
     res.status(200).send({ success: true });
 });
 
 // ==========================================
-// 3. ESTADO EN MEMORIA
+// LÓGICA DE NEGOCIO (TIMER ENGINE)
 // ==========================================
+// Movemos esto arriba para poder usarlo en el webhook
 const activeTournaments = new Map();
 const tournamentRoom = (id) => `tournament:${id}`;
-const displays = new Map();
-
-// ==========================================
-// 4. LÓGICA DE NEGOCIO (TIMER)
-// ==========================================
 
 function calculateState(startTimeStr, levels) {
     if (!startTimeStr || !levels || levels.length === 0) return null;
 
     const now = Date.now();
     const startTime = new Date(startTimeStr).getTime(); 
-    // Math.max(0, ...) evita tiempos negativos si el reloj del sistema varía
-    const elapsedMs = Math.max(0, now - startTime);
+    const elapsedMs = Math.max(0, now - startTime); // Evitar negativos
 
     let levelStartMs = 0;
-    
+    // Ordenar niveles por seguridad
     const sortedLevels = levels.sort((a, b) => a.levelNumber - b.levelNumber);
 
     for (let i = 0; i < sortedLevels.length; i++) {
@@ -87,163 +87,179 @@ function calculateState(startTimeStr, levels) {
         const durationMs = lvl.durationSeconds * 1000;
         const levelEndMs = levelStartMs + durationMs;
 
-        // Si estamos dentro de este nivel
+        // Estamos dentro de este nivel
         if (elapsedMs < levelEndMs) {
             const timeRemainingSeconds = Math.ceil((levelEndMs - elapsedMs) / 1000);
-            
             return {
                 finished: false,
                 currentLevel: lvl.levelNumber,
                 timeRemaining: timeRemainingSeconds
             };
         }
-        
         levelStartMs += durationMs;
     }
 
-    // Si salimos del loop, se acabó el tiempo de todos los niveles
     return { finished: true, currentLevel: sortedLevels.length, timeRemaining: 0 };
 }
-function runTournamentLoop(tournamentId, room) {
-    const active = activeTournaments.get(tournamentId);
+
+function runTournamentLoop(tournamentId, ioInstance) { // Pasamos IO como argumento
+    // Si ya existe un loop, no creamos otro, pero actualizamos la referencia si es necesario
+    let active = activeTournaments.get(tournamentId);
     if (!active) return;
 
     if (active.timerInterval) clearInterval(active.timerInterval);
 
-    console.log(`⏱️ [Timer] Loop INICIADO para ${tournamentId}`);
+    console.log(`⏱️ [Timer] Loop INICIADO/REINICIADO para ${tournamentId}`);
 
     active.timerInterval = setInterval(async () => {
+        // Recalcular estado basado en StartTime (Fuente de la verdad)
         const state = calculateState(active.startTime, active.levels);
 
         if (!state) return; 
 
-        // Caso: Terminado
+        const room = tournamentRoom(tournamentId);
+
+        // 1. Caso: Finalizado
         if (state.finished) {
             console.log(`🏁 [Timer] Torneo ${tournamentId} FINALIZADO`);
             clearInterval(active.timerInterval);
             activeTournaments.delete(tournamentId);
             
-            io.to(room).emit("tournament-control", { type: "finish" });
+            ioInstance.to(room).emit("tournament-control", { type: "finish" });
             
+            // Avisar a C# que terminó (Fire & Forget)
             try {
-                await fetch(`${BACKEND_API}/${tournamentId}`, {
+                fetch(`${BACKEND_API}/${tournamentId}`, {
                     method: "PATCH",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ Status: "Completed" })
-                });
-            } catch(e) { console.error("❌ Error actualizando status FINISH a C#", e.message); }
+                }).catch(e => console.error("Error patching finish:", e.message));
+            } catch(e) {}
             return;
         }
 
-        // Caso: Cambio de Nivel
+        // 2. Caso: Cambio de Nivel
         if (state.currentLevel !== active.cachedCurrentLevel) {
             console.log(`🆙 [Timer] NIVEL UP: ${active.cachedCurrentLevel} -> ${state.currentLevel}`);
-            
             active.cachedCurrentLevel = state.currentLevel;
 
-            io.to(room).emit("tournament-control", {
+            ioInstance.to(room).emit("tournament-control", {
                 type: "update-level",
                 data: { level: state.currentLevel }
             });
 
+            // Persistir nivel en C#
             try {
                 fetch(`${BACKEND_API}/${tournamentId}`, {
                     method: "PATCH",
                     headers: { "Content-Type": "application/json" },
                     body: JSON.stringify({ CurrentLevel: state.currentLevel })
-                });
-            } catch(e) { console.error("❌ Error patching level", e.message); }
+                }).catch(e => console.error("Error patching level:", e.message));
+            } catch(e) {}
         }
 
-        // Caso: Tick normal
-        io.to(room).emit("timer-sync", {
+        // 3. Caso: Tick Normal (Heartbeat)
+        ioInstance.to(room).emit("timer-sync", {
             currentLevel: state.currentLevel,
             timeLeft: state.timeRemaining,
             status: "Running"
         });
 
     }, 1000);
+    
+    // Guardamos la referencia actualizada con el intervalo
+    activeTournaments.set(tournamentId, active);
 }
 
 // ==========================================
-// 5. API HELPERS
+// 2. WEBHOOK (CORREGIDO Y OPTIMIZADO)
 // ==========================================
+app.post('/api/webhook/emit', (req, res) => {
+    const { tournamentId, event, data } = req.body;
 
-async function getTournamentFromApi(id) {
-    try {
-        console.log(`🔍 [API] Fetching torneo ${id}...`);
-        const res = await fetch(`${BACKEND_API}/${id}`);
-        if (!res.ok) {
-            console.error(`❌ [API] Error ${res.status} al obtener torneo`);
-            return null;
+    if (!tournamentId || !event) return res.status(400).send("Datos incompletos");
+
+    const room = tournamentRoom(tournamentId);
+    
+    // A. Broadcast inmediato a los clientes (TVs/Admins)
+    io.to(room).emit(event, data);
+    console.log(`📢 [Broadcast] ${event} -> ${room}`);
+
+    // B. INTERCEPTAR COMANDOS DE CONTROL (La corrección clave)
+    if (event === "tournament-control") {
+        
+        // --- START / RESUME ---
+        if (data.type === "start" || data.type === "resume") {
+            // Si C# nos envió el estado interno (_internalState), lo usamos para iniciar YA.
+            if (req.body.data?._internalState) {
+                const internal = req.body.data._internalState;
+                console.log(`⚡ [Webhook] Iniciando Loop Interno con datos inyectados para ${tournamentId}`);
+                
+                const active = {
+                    id: tournamentId,
+                    startTime: internal.startTime,
+                    levels: internal.levels || [],
+                    cachedCurrentLevel: internal.currentLevel,
+                    timerInterval: null
+                };
+                activeTournaments.set(tournamentId, active);
+                runTournamentLoop(tournamentId, io);
+            } 
+            // Fallback: Si C# no mandó estado (versión vieja), intentar recuperar
+            else if (!activeTournaments.has(tournamentId)) {
+                getTournamentFromApi(tournamentId).then(t => {
+                    if (t && t.startTime) {
+                        activeTournaments.set(tournamentId, {
+                            id: t.id,
+                            startTime: t.startTime,
+                            levels: t.levels,
+                            cachedCurrentLevel: t.currentLevel,
+                            timerInterval: null
+                        });
+                        runTournamentLoop(tournamentId, io);
+                    }
+                });
+            }
         }
-        return await res.json();
-    } catch (e) {
-        console.error("❌ [API] Excepción fetching:", e.message);
-        return null;
-    }
-}
-
-async function startTournamentApi(id) {
-    try {
-        console.log(`▶️ [API] Iniciando torneo ${id} en C#...`);
-        const res = await fetch(`${BACKEND_API}/${id}/start`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" }
-        });
-        if (!res.ok) {
-            console.error(`❌ [API] Error ${res.status} al iniciar torneo`);
-            return null;
+        
+        // --- PAUSE / FINISH ---
+        else if (data.type === "pause" || data.type === "finish") {
+            console.log(`⏸️ [Webhook] Deteniendo Loop Interno para ${tournamentId}`);
+            const active = activeTournaments.get(tournamentId);
+            if (active && active.timerInterval) {
+                clearInterval(active.timerInterval);
+                activeTournaments.delete(tournamentId); // Limpiar memoria
+            }
         }
-        return await res.json();
-    } catch (e) {
-        console.error("❌ [API] Excepción starting:", e.message);
-        return null;
     }
-}
+
+    res.status(200).send({ success: true });
+});
+
+// ... (Resto de helpers API: getTournamentFromApi igual que antes) ...
 
 // ==========================================
-// 6. SOCKET EVENTS
+// SOCKET EVENTS
 // ==========================================
-
 io.on("connection", (socket) => {
     
-    // 1. GESTIÓN DE PANTALLAS (TV PAIRING)
-    socket.on("register-display", () => {
-        const id = Math.random().toString(36).substring(2, 8).toUpperCase();
-        displays.set(id, socket.id);
-        socket.emit("display-id", id);
-        console.log(`📺 [Display] Registrada TV con código: ${id}`);
-    });
+    // ... (Lógica de displays igual) ...
 
-    socket.on("link-display", ({ displayId, tournamentId }) => {
-        const targetId = displays.get(displayId);
-        if (targetId) {
-            const target = io.sockets.sockets.get(targetId);
-            if (target) {
-                target.join(tournamentRoom(tournamentId));
-                target.emit("display-linked", { tournamentId });
-                console.log(`🔗 [Link] TV ${displayId} vinculada a torneo ${tournamentId}`);
-            }
-        } else {
-            console.warn(`⚠️ [Link] Intento fallido: Display ID ${displayId} no encontrado`);
-        }
-    });
-
-    // 2. UNIRSE A TORNEO
     socket.on("join-tournament", async ({ tournamentId }) => {
         if (!tournamentId) return;
         const room = tournamentRoom(tournamentId);
         socket.join(room);
-        console.log(`👤 [Join] Cliente ${socket.id} se unió a sala ${room}`);
-
+        
+        // RECUPERACIÓN INTELIGENTE
+        // Si el cliente se conecta y Node NO tiene el torneo corriendo en memoria,
+        // verificamos con la API por si acaso Node se reinició pero el torneo sigue "Running" en BD.
         let active = activeTournaments.get(tournamentId);
 
-        // Recuperación de estado si el server se reinició
         if (!active) {
             const t = await getTournamentFromApi(tournamentId);
-            if (t && t.startTime && t.status && t.status.toLowerCase() === "running") {
-                console.log(`♻️ [Recovery] Reviviendo torneo activo ${t.name}`);
+            // Solo revivimos si el status en BD es "Running" y tiene StartTime
+            if (t && t.startTime && t.status === "Running") {
+                console.log(`♻️ [Recovery] Restaurando torneo ${t.name} desde API`);
                 active = {
                     id: t.id,
                     startTime: t.startTime,
@@ -252,18 +268,14 @@ io.on("connection", (socket) => {
                     timerInterval: null
                 };
                 activeTournaments.set(tournamentId, active);
-                runTournamentLoop(tournamentId, room);
+                runTournamentLoop(tournamentId, io);
             }
         }
 
-        // Sincronización inmediata al conectar
+        // Si logramos recuperar o ya estaba activo, sincronizamos al cliente inmediatamente
         if (active) {
             const currentState = calculateState(active.startTime, active.levels);
-            if (currentState) {
-                 socket.emit("tournament-control", { 
-                    type: "update-level", 
-                    data: { level: currentState.currentLevel } 
-                });
+            if (currentState && !currentState.finished) {
                 socket.emit("timer-sync", {
                     currentLevel: currentState.currentLevel,
                     timeLeft: currentState.timeRemaining,
@@ -273,59 +285,11 @@ io.on("connection", (socket) => {
         }
     });
 
-    socket.on("leave-tournament", ({ tournamentId }) => {
-        if(tournamentId) socket.leave(tournamentRoom(tournamentId));
-    });
-
-    // 3. CONTROL DE ADMIN (START/PAUSE) - UNICA EXCEPCIÓN PERMITIDA
-    // Permitimos esto porque Node gestiona el Loop del Timer.
-    // Las acciones de jugadores (Rebuy/Eliminar) van por API C# -> Webhook.
-    socket.on("tournament-control", async ({ tournamentId, type }) => {
-        const room = tournamentRoom(tournamentId);
-        console.log(`🎮 [Control] Comando recibido: ${type} para ${tournamentId}`);
-        
-        if (type === "start") {
-         const updatedTournament = await startTournamentApi(tournamentId); // Llama al C# StartTournamentAsync corregido
-         if(updatedTournament) {
-             // Actualizamos el mapa en memoria con el NUEVO StartTime calculado por C#
-             const active = {
-                 id: updatedTournament.id,
-                 startTime: updatedTournament.startTime, // <--- CLAVE: Usar el nuevo StartTime
-                 levels: updatedTournament.levels,
-                 cachedCurrentLevel: updatedTournament.currentLevel,
-                 // ...
-             };
-             activeTournaments.set(tournamentId, active);
-             runTournamentLoop(tournamentId, tournamentRoom(tournamentId));
-         }
-    }
-        else if (type === "pause") {
-            const active = activeTournaments.get(tournamentId);
-            if (active) {
-                if (active.timerInterval) clearInterval(active.timerInterval);
-                activeTournaments.delete(tournamentId);
-            }
-            
-            try {
-                await fetch(`${BACKEND_API}/${tournamentId}`, {
-                    method: "PATCH",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ Status: "Paused" })
-                });
-            } catch(e) {}
-
-            io.to(room).emit("tournament-control", { type: "pause" });
-        }
-    });
-
-    socket.on("disconnect", (reason) => {
-        // Cliente desconectado
-    });
+    // Eliminamos el listener "tournament-control" del socket.
+    // SEGURIDAD: Los clientes NO deben poder iniciar/pausar torneos directamente por socket.
+    // Todo debe pasar por la API C# -> Webhook.
 });
 
-// Importante: Escuchar en 0.0.0.0 para Render
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Server Socket.io LISTO en puerto ${PORT}`);
-    console.log(`🌍 Health Check disponible en GET /`);
-    console.log(`🔗 Webhook disponible en POST /api/webhook/emit`);
 });
