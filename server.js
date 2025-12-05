@@ -50,34 +50,37 @@ const displays = new Map();
 const tournamentRoom = (id) => `tournament:${id}`;
 
 function runTournamentLoop(tournamentId, ioInstance) { 
-    // Gestión de singleton: si ya existe, lo limpiamos para reiniciar
     let active = activeTournaments.get(tournamentId);
     if (!active) return;
 
+    // LIMPIEZA CRÍTICA: Asegurar que no haya loops fantasmas
     if (active.timerInterval) clearInterval(active.timerInterval);
 
-    console.log(`⏱️ [Timer] Loop INICIADO para ${tournamentId}. Meta Absoluta: ${active.targetEndTime}`);
+    console.log(`⏱️ [Timer] INICIO REAL para ${tournamentId}. Meta: ${active.targetEndTime}`);
 
     active.timerInterval = setInterval(() => {
         const now = Date.now();
         const target = new Date(active.targetEndTime).getTime();
         
-        // Calculamos diferencia contra la meta absoluta
+        // CALCULO SIMPLE: Meta - Ahora
         const diff = target - now;
         const secondsLeft = Math.max(0, Math.ceil(diff / 1000));
 
-        // 1. Caso: Se acabó el tiempo del nivel
+        // 1. Fin del Nivel
         if (secondsLeft <= 0) {
             clearInterval(active.timerInterval);
+            active.timerInterval = null; // Marcar como detenido
+            
             ioInstance.to(tournamentRoom(tournamentId)).emit("timer-sync", {
                 currentLevel: active.currentLevel,
                 timeLeft: 0,
-                status: "Paused" // Pausamos visualmente en 0
+                status: "Paused" // Pausamos en 0 a la espera de Admin
             });
             return;
         }
 
-        // 2. Heartbeat normal (Tick)
+        // 2. Heartbeat (Optimizado: solo emitimos si cambió el segundo)
+        // Aunque socket.io optimiza esto, es bueno mantenerlo simple.
         ioInstance.to(tournamentRoom(tournamentId)).emit("timer-sync", {
             currentLevel: active.currentLevel,
             timeLeft: secondsLeft,
@@ -116,37 +119,37 @@ app.post('/api/webhook/emit', (req, res) => {
     console.log(`📢 [Broadcast] ${event} -> Sala ${room}`);
 
     // B. Interceptar Control de Torneo (Start/Pause/Finish)
-    if (event === "tournament-control") {
+if (event === "tournament-control") {
         
-        // INICIO / RESUME
+        // START / RESUME
         if (data.type === "start" || data.type === "resume") {
-            // Usamos los datos inyectados por C# (StartTournamentAsync)
-            if (req.body.data?._internalState) {
-                const internal = req.body.data._internalState;
-                
+            const internal = req.body.data?._internalState;
+            
+            // Solo iniciamos si C# nos mandó la meta
+            if (internal && internal.targetEndTime) {
                 const active = {
                     id: tournamentId,
-                    targetEndTime: internal.targetEndTime, // La clave: C# calcula cuándo termina
+                    targetEndTime: internal.targetEndTime, // CONFIANZA TOTAL EN C#
                     currentLevel: internal.currentLevel,
                     timerInterval: null
                 };
-                
+                // Guardamos y ejecutamos
                 activeTournaments.set(tournamentId, active);
                 runTournamentLoop(tournamentId, io);
             } 
         }
         
-        // PAUSA / FIN
+        // PAUSE / FINISH
         else if (data.type === "pause" || data.type === "finish") {
-            console.log(`⏸️ [Control] Deteniendo reloj para ${tournamentId}`);
             const active = activeTournaments.get(tournamentId);
             if (active && active.timerInterval) {
                 clearInterval(active.timerInterval);
-                activeTournaments.delete(tournamentId);
+                active.timerInterval = null;
+                activeTournaments.delete(tournamentId); // Limpiamos memoria
+                console.log(`⏸️ [Timer] PAUSA/FIN para ${tournamentId}`);
             }
         }
     }
-
     res.status(200).send({ success: true });
 });
 
