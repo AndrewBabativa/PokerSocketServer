@@ -10,29 +10,24 @@ const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
+// URL Backend C#
+const BACKEND_API = "https://pokergenysbackend.onrender.com/api/Tournaments";
+
 // Middleware para JSON
 app.use(express.json());
 
-// 🔥 LOGGING HTTP (Ver tráfico de C#)
-// Esto imprimirá cada vez que C# llame al Webhook
+// 🔥 LOGGING HTTP (Solo Webhooks relevantes)
 app.use((req, res, next) => {
-    // Ignoramos la ruta raíz para no ensuciar el log con los Health Checks de Render
-    if (req.path !== '/') {
-        console.log(`📡 [HTTP INCOMING] ${req.method} ${req.path}`);
-        if (req.method === 'POST') {
-            console.log('   📦 Body:', JSON.stringify(req.body, null, 2));
-        }
+    if (req.method === 'POST' && req.path.includes('webhook')) {
+        console.log(`📨 [Webhook] Evento recibido desde C#:`, JSON.stringify(req.body, null, 2));
     }
     next();
 });
 
-// Ruta de Health Check (Vital para Render)
+// Ruta de Health Check
 app.get('/', (req, res) => {
     res.status(200).send("Poker Socket Server is Running 🚀");
 });
-
-// URL Backend C#
-const BACKEND_API = "https://pokergenysbackend.onrender.com/api/Tournaments";
 
 const io = new Server(server, {
     cors: {
@@ -56,9 +51,9 @@ app.post('/api/webhook/emit', (req, res) => {
 
     const room = tournamentRoom(tournamentId);
     
-    console.log(`📢 [Webhook Relay] C# dice: '${event}' -> Sala: ${room}`);
+    console.log(`📢 [Broadcast] Enviando '${event}' a Sala: ${room}`);
     
-    // Emitir a la sala específica
+    // Emitir a la sala específica (TVs y Clientes escuchan esto)
     io.to(room).emit(event, data);
 
     res.status(200).send({ success: true });
@@ -72,7 +67,7 @@ const tournamentRoom = (id) => `tournament:${id}`;
 const displays = new Map();
 
 // ==========================================
-// 4. LÓGICA DE NEGOCIO
+// 4. LÓGICA DE NEGOCIO (TIMER)
 // ==========================================
 
 function calculateState(startTimeStr, levels) {
@@ -165,8 +160,6 @@ function runTournamentLoop(tournamentId, room) {
         }
 
         // Caso: Tick normal
-        // NOTA: Comentamos el log del tick para no saturar la consola de Render (1 log por segundo)
-        // console.log(`tick ${state.timeRemaining}`); 
         io.to(room).emit("timer-sync", {
             currentLevel: state.currentLevel,
             timeLeft: state.timeRemaining,
@@ -218,16 +211,8 @@ async function startTournamentApi(id) {
 // ==========================================
 
 io.on("connection", (socket) => {
-    console.log(`🔌 [Socket] Cliente Conectado: ${socket.id}`);
-
-    // 🔥 LOGGING DE SOCKETS (Ver qué manda el cliente)
-    socket.onAny((eventName, ...args) => {
-        // Filtramos timer-sync si lo emitiese el cliente (raro) para no saturar
-        if (eventName !== 'timer-sync') {
-            console.log(`📨 [Socket IN] Evento: "${eventName}"`, args);
-        }
-    });
-
+    
+    // 1. GESTIÓN DE PANTALLAS (TV PAIRING)
     socket.on("register-display", () => {
         const id = Math.random().toString(36).substring(2, 8).toUpperCase();
         displays.set(id, socket.id);
@@ -249,6 +234,7 @@ io.on("connection", (socket) => {
         }
     });
 
+    // 2. UNIRSE A TORNEO
     socket.on("join-tournament", async ({ tournamentId }) => {
         if (!tournamentId) return;
         const room = tournamentRoom(tournamentId);
@@ -257,7 +243,7 @@ io.on("connection", (socket) => {
 
         let active = activeTournaments.get(tournamentId);
 
-        // Recuperación
+        // Recuperación de estado si el server se reinició
         if (!active) {
             const t = await getTournamentFromApi(tournamentId);
             if (t && t.startTime && t.status && t.status.toLowerCase() === "running") {
@@ -274,6 +260,7 @@ io.on("connection", (socket) => {
             }
         }
 
+        // Sincronización inmediata al conectar
         if (active) {
             const currentState = calculateState(active.startTime, active.levels);
             if (currentState) {
@@ -294,6 +281,9 @@ io.on("connection", (socket) => {
         if(tournamentId) socket.leave(tournamentRoom(tournamentId));
     });
 
+    // 3. CONTROL DE ADMIN (START/PAUSE) - UNICA EXCEPCIÓN PERMITIDA
+    // Permitimos esto porque Node gestiona el Loop del Timer.
+    // Las acciones de jugadores (Rebuy/Eliminar) van por API C# -> Webhook.
     socket.on("tournament-control", async ({ tournamentId, type }) => {
         const room = tournamentRoom(tournamentId);
         console.log(`🎮 [Control] Comando recibido: ${type} para ${tournamentId}`);
@@ -338,25 +328,12 @@ io.on("connection", (socket) => {
         }
     });
 
-    // --- RELAYS ---
-    socket.on("player-action", ({ tournamentId, action, payload }) => {
-        socket.to(tournamentRoom(tournamentId)).emit("player-action", { action, payload });
-    });
-    
-    socket.on("admin-instruction", ({ tournamentId, type, message, payload }) => {
-        io.to(tournamentRoom(tournamentId)).emit("tournament-instruction", {
-            type: type,
-            message: message,
-            payload: payload
-        });
-    });
-
     socket.on("disconnect", (reason) => {
-        // console.log(`❌ [Socket] Cliente desconectado: ${reason}`); // Descomentar si quieres ver desconexiones
+        // Cliente desconectado
     });
 });
 
-// Importante: Escuchar en 0.0 para Render
+// Importante: Escuchar en 0.0.0.0 para Render
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Server Socket.io LISTO en puerto ${PORT}`);
     console.log(`🌍 Health Check disponible en GET /`);
