@@ -10,235 +10,139 @@ const app = express();
 const server = http.createServer(app);
 const PORT = process.env.PORT || 3000;
 
-// Middleware para JSON
+// URL Backend C#
+const BACKEND_API = "https://pokergenysbackend.onrender.com/api/Tournaments";
+
 app.use(express.json());
 
-// 🔥 LOGGING HTTP (Ver tráfico de C#)
+// Logging HTTP para depuración
 app.use((req, res, next) => {
     if (req.path !== '/') {
-        console.log(`📡 [HTTP INCOMING] ${req.method} ${req.path}`);
+        // Logueamos solo un resumen para no saturar
         if (req.method === 'POST') {
-            // Logueamos solo un resumen para no saturar la consola si el body es gigante
-            const bodyPreview = JSON.stringify(req.body).substring(0, 200);
-            console.log(`   📦 Body: ${bodyPreview}...`);
+            console.log(`📨 [Webhook] ${req.path}`, JSON.stringify(req.body).substring(0, 150) + "...");
         }
     }
     next();
 });
 
-// Ruta de Health Check (Vital para Render)
-app.get('/', (req, res) => {
-    res.status(200).send("Poker Socket Server is Running 🚀");
-});
-
-// URL Backend C#
-const BACKEND_API = "https://pokergenysbackend.onrender.com/api/Tournaments";
+app.get('/', (req, res) => res.status(200).send("Poker Socket Server is Running 🚀"));
 
 const io = new Server(server, {
     cors: {
-        // Permitimos cualquier origen para evitar bloqueos CORS en producción
-        // Puedes restringirlo a tus dominios reales si lo prefieres
-        origin: "*", 
+        origin: "*", // Permisivo para evitar problemas de conexión inicial
         methods: ["GET", "POST"],
         credentials: true
     },
-    // 🔥 CONFIGURACIÓN CRÍTICA PARA RENDER 🔥
-    // Render usa balanceadores de carga que rompen el HTTP Long-Polling si no hay Sticky Sessions.
-    // Al permitir y priorizar 'websocket', reducimos errores de transporte.
     transports: ["websocket", "polling"], 
     
-    // Tiempos de espera extendidos para evitar desconexiones fantasma
+    // 🔥 CONFIGURACIÓN CRÍTICA PARA RENDER 🔥
+    // Evita el error "transport close" y mantiene el reloj vivo
     pingTimeout: 60000, 
     pingInterval: 25000 
 });
 
 // ==========================================
-// 2. ESTADO EN MEMORIA Y UTILIDADES
+// 2. MOTOR DE TIEMPO (TIMER ENGINE)
 // ==========================================
 const activeTournaments = new Map();
 const displays = new Map();
 const tournamentRoom = (id) => `tournament:${id}`;
 
-// Lógica del Timer (Motor de Tiempo)
-function calculateState(startTimeStr, levels) {
-    if (!startTimeStr || !levels || levels.length === 0) return null;
-
-    const now = Date.now();
-    const startTime = new Date(startTimeStr).getTime(); 
-    const elapsedMs = Math.max(0, now - startTime); // Evitar negativos
-
-    let levelStartMs = 0;
-    // Ordenar niveles por seguridad
-    const sortedLevels = levels.sort((a, b) => a.levelNumber - b.levelNumber);
-
-    for (let i = 0; i < sortedLevels.length; i++) {
-        const lvl = sortedLevels[i];
-        const durationMs = lvl.durationSeconds * 1000;
-        const levelEndMs = levelStartMs + durationMs;
-
-        // Estamos dentro de este nivel
-        if (elapsedMs < levelEndMs) {
-            const timeRemainingSeconds = Math.ceil((levelEndMs - elapsedMs) / 1000);
-            return {
-                finished: false,
-                currentLevel: lvl.levelNumber,
-                timeRemaining: timeRemainingSeconds
-            };
-        }
-        levelStartMs += durationMs;
-    }
-
-    return { finished: true, currentLevel: sortedLevels.length, timeRemaining: 0 };
-}
-
 function runTournamentLoop(tournamentId, ioInstance) { 
-    // Si ya existe un loop activo, lo reutilizamos o reiniciamos limpiamente
+    // Gestión de singleton: si ya existe, lo limpiamos para reiniciar
     let active = activeTournaments.get(tournamentId);
     if (!active) return;
 
     if (active.timerInterval) clearInterval(active.timerInterval);
 
-    console.log(`⏱️ [Timer] Loop INICIADO para ${tournamentId}`);
+    console.log(`⏱️ [Timer] Loop INICIADO para ${tournamentId}. Meta Absoluta: ${active.targetEndTime}`);
 
-    active.timerInterval = setInterval(async () => {
-        // Recalcular estado basado en StartTime (Fuente de la verdad)
-        const state = calculateState(active.startTime, active.levels);
+    active.timerInterval = setInterval(() => {
+        const now = Date.now();
+        const target = new Date(active.targetEndTime).getTime();
+        
+        // Calculamos diferencia contra la meta absoluta
+        const diff = target - now;
+        const secondsLeft = Math.max(0, Math.ceil(diff / 1000));
 
-        if (!state) return; 
-
-        const room = tournamentRoom(tournamentId);
-
-        // 1. Caso: Finalizado
-        if (state.finished) {
-            console.log(`🏁 [Timer] Torneo ${tournamentId} FINALIZADO`);
+        // 1. Caso: Se acabó el tiempo del nivel
+        if (secondsLeft <= 0) {
             clearInterval(active.timerInterval);
-            activeTournaments.delete(tournamentId);
-            
-            ioInstance.to(room).emit("tournament-control", { type: "finish" });
-            
-            // Avisar a C# que terminó (Fire & Forget)
-            try {
-                fetch(`${BACKEND_API}/${tournamentId}`, {
-                    method: "PATCH",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ Status: "Completed" })
-                }).catch(e => console.error("Error patching finish:", e.message));
-            } catch(e) {}
+            ioInstance.to(tournamentRoom(tournamentId)).emit("timer-sync", {
+                currentLevel: active.currentLevel,
+                timeLeft: 0,
+                status: "Paused" // Pausamos visualmente en 0
+            });
             return;
         }
 
-        // 2. Caso: Cambio de Nivel
-        if (state.currentLevel !== active.cachedCurrentLevel) {
-            console.log(`🆙 [Timer] NIVEL UP: ${active.cachedCurrentLevel} -> ${state.currentLevel}`);
-            active.cachedCurrentLevel = state.currentLevel;
-
-            ioInstance.to(room).emit("tournament-control", {
-                type: "update-level",
-                data: { level: state.currentLevel }
-            });
-
-            // Persistir nivel en C#
-            try {
-                fetch(`${BACKEND_API}/${tournamentId}`, {
-                    method: "PATCH",
-                    headers: { "Content-Type": "application/json" },
-                    body: JSON.stringify({ CurrentLevel: state.currentLevel })
-                }).catch(e => console.error("Error patching level:", e.message));
-            } catch(e) {}
-        }
-
-        // 3. Caso: Tick Normal (Heartbeat)
-        ioInstance.to(room).emit("timer-sync", {
-            currentLevel: state.currentLevel,
-            timeLeft: state.timeRemaining,
+        // 2. Heartbeat normal (Tick)
+        ioInstance.to(tournamentRoom(tournamentId)).emit("timer-sync", {
+            currentLevel: active.currentLevel,
+            timeLeft: secondsLeft,
             status: "Running"
         });
 
     }, 1000);
     
-    // Guardamos la referencia actualizada con el intervalo
     activeTournaments.set(tournamentId, active);
 }
 
-// ... (Helpers de API: getTournamentFromApi se mantiene igual si lo tenías definido abajo, 
-// si no, asegúrate de incluirlo. Aquí asumo que ya lo tienes o lo necesitas) ...
-
+// Helper para recuperar datos de C# si Node se reinicia
 async function getTournamentFromApi(id) {
     try {
-        console.log(`🔍 [API] Fetching torneo ${id}...`);
         const res = await fetch(`${BACKEND_API}/${id}`);
-        if (!res.ok) {
-            console.error(`❌ [API] Error ${res.status} al obtener torneo`);
-            return null;
-        }
+        if (!res.ok) return null;
         return await res.json();
     } catch (e) {
-        console.error("❌ [API] Excepción fetching:", e.message);
+        console.error("❌ Error API:", e.message);
         return null;
     }
 }
 
 // ==========================================
-// 3. WEBHOOK (Comunicación C# -> Node)
+// 3. WEBHOOK (Recibe órdenes de C#)
 // ==========================================
 app.post('/api/webhook/emit', (req, res) => {
     const { tournamentId, event, data } = req.body;
 
-    if (!tournamentId || !event) {
-        console.warn("⚠️ [Webhook] Rechazado: Faltan datos", req.body);
-        return res.status(400).send("Faltan datos");
-    }
+    if (!tournamentId || !event) return res.status(400).send("Faltan datos");
 
     const room = tournamentRoom(tournamentId);
     
-    // A. Broadcast inmediato a los clientes (TVs/Admins)
+    // A. Broadcast inmediato (Acciones de jugadores, alertas, etc.)
     io.to(room).emit(event, data);
-    console.log(`📢 [Broadcast] ${event} -> ${room}`);
+    console.log(`📢 [Broadcast] ${event} -> Sala ${room}`);
 
-    // B. INTERCEPTAR COMANDOS DE CONTROL (La corrección clave para que arranque el reloj)
+    // B. Interceptar Control de Torneo (Start/Pause/Finish)
     if (event === "tournament-control") {
         
-        // --- START / RESUME ---
+        // INICIO / RESUME
         if (data.type === "start" || data.type === "resume") {
-            // Si C# nos envió el estado interno (_internalState), lo usamos para iniciar YA.
+            // Usamos los datos inyectados por C# (StartTournamentAsync)
             if (req.body.data?._internalState) {
                 const internal = req.body.data._internalState;
-                console.log(`⚡ [Webhook] Iniciando Loop Interno con datos inyectados para ${tournamentId}`);
                 
                 const active = {
                     id: tournamentId,
-                    startTime: internal.startTime,
-                    levels: internal.levels || [],
-                    cachedCurrentLevel: internal.currentLevel,
+                    targetEndTime: internal.targetEndTime, // La clave: C# calcula cuándo termina
+                    currentLevel: internal.currentLevel,
                     timerInterval: null
                 };
+                
                 activeTournaments.set(tournamentId, active);
                 runTournamentLoop(tournamentId, io);
             } 
-            // Fallback: Si C# no mandó estado (versión vieja), intentar recuperar
-            else if (!activeTournaments.has(tournamentId)) {
-                getTournamentFromApi(tournamentId).then(t => {
-                    if (t && t.startTime) {
-                        activeTournaments.set(tournamentId, {
-                            id: t.id,
-                            startTime: t.startTime,
-                            levels: t.levels,
-                            cachedCurrentLevel: t.currentLevel,
-                            timerInterval: null
-                        });
-                        runTournamentLoop(tournamentId, io);
-                    }
-                });
-            }
         }
         
-        // --- PAUSE / FINISH ---
+        // PAUSA / FIN
         else if (data.type === "pause" || data.type === "finish") {
-            console.log(`⏸️ [Webhook] Deteniendo Loop Interno para ${tournamentId}`);
+            console.log(`⏸️ [Control] Deteniendo reloj para ${tournamentId}`);
             const active = activeTournaments.get(tournamentId);
             if (active && active.timerInterval) {
                 clearInterval(active.timerInterval);
-                activeTournaments.delete(tournamentId); // Limpiar memoria
+                activeTournaments.delete(tournamentId);
             }
         }
     }
@@ -251,12 +155,11 @@ app.post('/api/webhook/emit', (req, res) => {
 // ==========================================
 io.on("connection", (socket) => {
     
-    // A. GESTIÓN DE PANTALLAS (TV PAIRING)
+    // Pairing de Pantallas
     socket.on("register-display", () => {
         const id = Math.random().toString(36).substring(2, 8).toUpperCase();
         displays.set(id, socket.id);
         socket.emit("display-id", id);
-        console.log(`📺 [Display] Registrada TV con código: ${id}`);
     });
 
     socket.on("link-display", ({ displayId, tournamentId }) => {
@@ -266,35 +169,48 @@ io.on("connection", (socket) => {
             if (target) {
                 target.join(tournamentRoom(tournamentId));
                 target.emit("display-linked", { tournamentId });
-                console.log(`🔗 [Link] TV ${displayId} vinculada a torneo ${tournamentId}`);
             }
-        } else {
-            console.warn(`⚠️ [Link] Intento fallido: Display ID ${displayId} no encontrado`);
         }
     });
 
-    // B. UNIRSE A TORNEO
+    // Unirse a Sala de Torneo
     socket.on("join-tournament", async ({ tournamentId }) => {
         if (!tournamentId) return;
         const room = tournamentRoom(tournamentId);
         socket.join(room);
-        console.log(`👤 [Join] Cliente ${socket.id} se unió a sala ${room}`);
         
-        // RECUPERACIÓN INTELIGENTE
-        // Si el cliente se conecta y Node NO tiene el torneo corriendo en memoria (ej. tras reinicio),
-        // verificamos con la API por si acaso el torneo sigue "Running" en BD.
+        // --- LÓGICA DE RECUPERACIÓN ---
+        // Si el cliente se conecta y Node NO tiene el reloj corriendo (ej. reinicio de server),
+        // preguntamos a C# si el torneo debería estar corriendo.
         let active = activeTournaments.get(tournamentId);
 
         if (!active) {
             const t = await getTournamentFromApi(tournamentId);
-            // Solo revivimos si el status en BD es "Running" y tiene StartTime
+            // Si en BD dice "Running", recalculamos la meta
             if (t && t.startTime && t.status === "Running") {
-                console.log(`♻️ [Recovery] Restaurando torneo ${t.name} desde API`);
+                console.log(`♻️ [Recovery] Restaurando torneo activo ${t.name}`);
+                
+                // Calcular tiempo restante basado en lógica de recuperación
+                // Nota: Esto es un fallback. Lo ideal es que C# mande el webhook, 
+                // pero esto salva si se reinicia el pod de Render.
+                
+                // Buscar duración nivel actual
+                const currentLvl = t.levels.find(l => l.levelNumber === t.currentLevel);
+                const duration = currentLvl ? currentLvl.durationSeconds : 0;
+                
+                // Reconstruir targetEndTime basado en StartTime de BD (que C# ajusta al pausar/resumir)
+                const start = new Date(t.startTime).getTime();
+                // Asumimos que start + duration es el final (aproximación para recovery)
+                // O mejor: Calculamos el targetEndTime con la info que tenemos
+                
+                // NOTA: Para recovery perfecto, active.targetEndTime debería guardarse en Redis, 
+                // pero por ahora usamos el StartTime ajustado de C# como base.
+                const targetTimeRecovery = new Date(start + (duration * 1000)).toISOString();
+
                 active = {
                     id: t.id,
-                    startTime: t.startTime,
-                    levels: t.levels || [],
-                    cachedCurrentLevel: t.currentLevel,
+                    targetEndTime: targetTimeRecovery,
+                    currentLevel: t.currentLevel,
                     timerInterval: null
                 };
                 activeTournaments.set(tournamentId, active);
@@ -302,31 +218,25 @@ io.on("connection", (socket) => {
             }
         }
 
-        // Si logramos recuperar o ya estaba activo, sincronizamos al cliente inmediatamente
+        // Sincronización inmediata al conectar (Snap)
         if (active) {
-            const currentState = calculateState(active.startTime, active.levels);
-            if (currentState && !currentState.finished) {
-                socket.emit("timer-sync", {
-                    currentLevel: currentState.currentLevel,
-                    timeLeft: currentState.timeRemaining,
-                    status: "Running"
-                });
-            }
+            const now = Date.now();
+            const target = new Date(active.targetEndTime).getTime();
+            const seconds = Math.max(0, Math.ceil((target - now)/1000));
+            
+            socket.emit("timer-sync", {
+                currentLevel: active.currentLevel,
+                timeLeft: seconds,
+                status: "Running"
+            });
         }
     });
 
     socket.on("leave-tournament", ({ tournamentId }) => {
         if(tournamentId) socket.leave(tournamentRoom(tournamentId));
     });
-
-    socket.on("disconnect", (reason) => {
-        // Cliente desconectado
-    });
 });
 
-// Importante: Escuchar en 0.0.0.0 para Render
 server.listen(PORT, '0.0.0.0', () => {
     console.log(`✅ Server Socket.io LISTO en puerto ${PORT}`);
-    console.log(`🌍 Health Check disponible en GET /`);
-    console.log(`🔗 Webhook disponible en POST /api/webhook/emit`);
 });
