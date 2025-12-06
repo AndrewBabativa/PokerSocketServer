@@ -16,6 +16,8 @@ app.use((req, res, next) => {
     if (req.method === 'POST' && req.path.includes('webhook')) {
         // Log solo para ver que C# está hablando
         console.log(`📨 [Webhook] Evento recibido: ${req.body.event}`); 
+		 console.log(`📨 [Webhook] res: ${res}`); 
+		  console.log(`📨 [Webhook] next: ${next}`); 
     }
     next();
 });
